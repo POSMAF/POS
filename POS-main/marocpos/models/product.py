@@ -294,21 +294,39 @@ class Product:
                         variant_dict['attribute_values'] = {}
                         variant_dict['attributes'] = {}
                     
-                    # Compute total price adjustment from attribute combinations
+                    # Print parsed values for debugging
+                    print(f"Variant {variant_dict['id']}: Parsed attribute values: {variant_dict['attributes']}")
+                    
+                    # Try to get product attribute lines to calculate price extras
                     try:
-                        # Get the template attribute values for this variant
+                        # Get product attributes and possible values
                         cursor.execute("""
-                            SELECT ptav.price_extra
-                            FROM ProductVariantCombination pvc
-                            JOIN ProductTemplateAttributeValue ptav ON pvc.template_attribute_value_id = ptav.id
-                            WHERE pvc.product_variant_id = ?
-                        """, (variant_dict['id'],))
+                            SELECT 
+                                pal.id as line_id,
+                                a.name as attribute_name,
+                                pav.value as attribute_value,
+                                ptav.price_extra
+                            FROM ProductTemplateAttributeLine pal
+                            JOIN ProductAttributes a ON pal.attribute_id = a.id
+                            JOIN ProductTemplateAttributeValue ptav ON ptav.line_id = pal.id
+                            JOIN ProductAttributeValues pav ON ptav.value_id = pav.id
+                            WHERE pal.product_id = ?
+                        """, (product_id,))
                         
-                        # Sum up all price extras
-                        price_extras = cursor.fetchall()
-                        total_price_extra = sum(float(extra['price_extra'] or 0) for extra in price_extras)
+                        attribute_values = cursor.fetchall()
                         
-                        # Add in any explicit price_adjustment for the variant 
+                        # Get variant's attribute values from JSON
+                        variant_attributes = variant_dict['attributes']
+                        
+                        # Calculate price extras
+                        total_price_extra = 0.0
+                        for attr in attribute_values:
+                            # Check if this attribute value is used in the variant
+                            if attr['attribute_name'] in variant_attributes and variant_attributes[attr['attribute_name']] == attr['attribute_value']:
+                                # Add the price extra for this attribute value
+                                total_price_extra += float(attr['price_extra'] or 0)
+                        
+                        # Get variant price adjustment
                         base_adj = float(variant_dict.get('price_adjustment') or 0)
                         
                         # Store both values
@@ -319,9 +337,34 @@ class Product:
                         
                     except Exception as e:
                         print(f"Error calculating price adjustment for variant {variant_dict['id']}: {e}")
-                        # Use just the base adjustment as fallback
-                        variant_dict['total_price_adjustment'] = float(variant_dict.get('price_adjustment') or 0)
                         
+                        # Try alternative method using ProductVariantCombination
+                        try:
+                            cursor.execute("""
+                                SELECT ptav.price_extra
+                                FROM ProductVariantCombination pvc
+                                JOIN ProductTemplateAttributeValue ptav ON pvc.template_attribute_value_id = ptav.id
+                                WHERE pvc.product_variant_id = ?
+                            """, (variant_dict['id'],))
+                            
+                            price_extras = cursor.fetchall()
+                            total_price_extra = sum(float(extra['price_extra'] or 0) for extra in price_extras)
+                            
+                            # Add in any explicit price_adjustment for the variant 
+                            base_adj = float(variant_dict.get('price_adjustment') or 0)
+                            
+                            # Store both values
+                            variant_dict['price_extras'] = total_price_extra
+                            variant_dict['total_price_adjustment'] = total_price_extra + base_adj
+                            
+                            print(f"Variant {variant_dict['id']} - Alt method - Total price adjustment: {variant_dict['total_price_adjustment']} ({base_adj} variant, {total_price_extra} attributes)")
+                            
+                        except Exception as e2:
+                            print(f"Error with alternative method: {e2}")
+                            # Use just the base adjustment as fallback
+                            variant_dict['price_extras'] = 0
+                            variant_dict['total_price_adjustment'] = float(variant_dict.get('price_adjustment') or 0)
+                    
                     # Add explicit debugging output
                     print(f"Returning variant: {variant_dict['id']}, attributes: {variant_dict.get('attributes')}, price_adjustment: {variant_dict.get('total_price_adjustment')}")
                     
