@@ -72,6 +72,23 @@ class ProductAttribute:
                     )
                 """)
                 
+                # Create ProductVariants table
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS ProductVariants (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        product_id INTEGER NOT NULL,
+                        name TEXT,
+                        sku TEXT,
+                        barcode TEXT,
+                        unit_price REAL DEFAULT 0,
+                        purchase_price REAL DEFAULT 0,
+                        stock INTEGER DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (product_id) REFERENCES Products(id) ON DELETE CASCADE
+                    )
+                """)
+                
                 # Create ProductVariantCombination table
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS ProductVariantCombination (
@@ -87,38 +104,11 @@ class ProductAttribute:
                     )
                 """)
                 
-                # Check if we need to add display_type to existing ProductAttributes table
-                cursor.execute("PRAGMA table_info(ProductAttributes)")
-                columns = [row[1] for row in cursor.fetchall()]
-                
-                if 'display_type' not in columns:
-                    print("Adding display_type column to ProductAttributes table...")
-                    cursor.execute("ALTER TABLE ProductAttributes ADD COLUMN display_type TEXT DEFAULT 'radio'")
-                
-                if 'updated_at' not in columns:
-                    print("Adding updated_at column to ProductAttributes table...")
-                    cursor.execute("ALTER TABLE ProductAttributes ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-                
-                # Check if we need to add sequence and html_color to existing ProductAttributeValues table
-                cursor.execute("PRAGMA table_info(ProductAttributeValues)")
-                columns = [row[1] for row in cursor.fetchall()]
-                
-                if 'sequence' not in columns:
-                    print("Adding sequence column to ProductAttributeValues table...")
-                    cursor.execute("ALTER TABLE ProductAttributeValues ADD COLUMN sequence INTEGER DEFAULT 0")
-                
-                if 'html_color' not in columns:
-                    print("Adding html_color column to ProductAttributeValues table...")
-                    cursor.execute("ALTER TABLE ProductAttributeValues ADD COLUMN html_color TEXT")
-                
-                if 'updated_at' not in columns:
-                    print("Adding updated_at column to ProductAttributeValues table...")
-                    cursor.execute("ALTER TABLE ProductAttributeValues ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
-                
                 conn.commit()
+                print("✅ Product variant tables created successfully")
                 return True
             except Exception as e:
-                print(f"Error creating attribute tables: {e}")
+                print(f"Error creating variant tables: {e}")
                 return False
             finally:
                 conn.close()
@@ -132,19 +122,14 @@ class ProductAttribute:
             try:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT id, name, description, created_at
+                    SELECT id, name, description, display_type, created_at
                     FROM ProductAttributes
                     ORDER BY name
                 """)
                 
                 attributes = []
                 for row in cursor.fetchall():
-                    attributes.append({
-                        'id': row[0],
-                        'name': row[1],
-                        'description': row[2],
-                        'created_at': row[3]
-                    })
+                    attributes.append(dict(row))
                 return attributes
             except Exception as e:
                 print(f"Error getting attributes: {e}")
@@ -198,17 +183,29 @@ class ProductAttribute:
         return None
 
     @staticmethod
-    def update_attribute(attribute_id, name, description=None):
+    def update_attribute(attribute_id, name=None, description=None, display_type=None):
         """Update an existing attribute"""
         conn = get_connection()
         if conn:
             try:
                 cursor = conn.cursor()
+                
+                # Get current values
+                cursor.execute("SELECT * FROM ProductAttributes WHERE id = ?", (attribute_id,))
+                attribute = cursor.fetchone()
+                if not attribute:
+                    return False
+                
+                # Use current values as defaults
+                name = name or attribute['name']
+                description = description if description is not None else attribute['description']
+                display_type = display_type or attribute['display_type']
+                
                 cursor.execute("""
                     UPDATE ProductAttributes
-                    SET name = ?, description = ?
+                    SET name = ?, description = ?, display_type = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
-                """, (name, description, attribute_id))
+                """, (name, description, display_type, attribute_id))
                 
                 conn.commit()
                 return cursor.rowcount > 0
@@ -254,18 +251,15 @@ class ProductAttribute:
             try:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT id, value
+                    SELECT id, value, sequence, html_color
                     FROM ProductAttributeValues
                     WHERE attribute_id = ?
-                    ORDER BY value
+                    ORDER BY sequence, value
                 """, (attribute_id,))
                 
                 values = []
                 for row in cursor.fetchall():
-                    values.append({
-                        'id': row[0],
-                        'value': row[1]
-                    })
+                    values.append(dict(row))
                 return values
             except Exception as e:
                 print(f"Error getting attribute values: {e}")
@@ -515,23 +509,16 @@ class ProductAttribute:
         return False
     
     @staticmethod
-    def generate_variant_combinations(product_id_or_attributes):
+    def generate_variant_combinations(product_id):
         """
         Generate all possible variant combinations for a product
         
         Args:
-            product_id_or_attributes: Either a product ID or a dictionary of attribute names to values
+            product_id: The product ID to generate combinations for
             
         Returns:
-            A list of variant definitions
+            A list of variant definitions with attribute values and price extras
         """
-        # Check if we received a dict of attributes instead of a product_id
-        if isinstance(product_id_or_attributes, dict):
-            # We received attributes_values directly, use the legacy dictionary method
-            return ProductAttribute.generate_variant_combinations_dict(product_id_or_attributes)
-            
-        # Otherwise, we have a product_id, proceed with the new implementation    
-        product_id = product_id_or_attributes
         conn = get_connection()
         if conn:
             try:
@@ -543,41 +530,43 @@ class ProductAttribute:
                 if not attribute_lines:
                     return []
                 
-                # Prepare data structure for generating combinations
-                line_values = {}
-                for line in attribute_lines:
-                    attribute_name = line['attribute_name']
-                    line_values[attribute_name] = line['values']
-                
-                # Generate all combinations
+                # Generate all combinations recursively
                 combinations = []
                 
-                def generate_combinations(lines, current_combination=None, index=0):
-                    if current_combination is None:
-                        current_combination = {
+                def generate_combinations(lines, current_index=0, current_combo=None):
+                    if current_combo is None:
+                        current_combo = {
                             'attribute_value_ids': [],
+                            'template_value_ids': [],
                             'price_extra': 0,
                             'attributes': {}
                         }
                     
-                    if index >= len(lines):
-                        combinations.append(current_combination.copy())
+                    if current_index >= len(lines):
+                        combinations.append(current_combo.copy())
                         return
                     
-                    current_line = lines[index]
-                    attribute_name = current_line['attribute_name']
+                    line = lines[current_index]
+                    attribute_name = line['attribute_name']
                     
-                    for value in current_line['values']:
-                        # Add this attribute value to the combination
-                        new_combination = {
-                            'attribute_value_ids': current_combination['attribute_value_ids'] + [value['template_value_id']],
-                            'price_extra': current_combination['price_extra'] + value['price_extra'],
-                            'attributes': {**current_combination['attributes'], attribute_name: value['value']}
-                        }
+                    for value in line['values']:
+                        # Create a new combination with this value
+                        new_combo = current_combo.copy()
+                        new_combo['attribute_value_ids'] = new_combo['attribute_value_ids'] + [value['value_id']]
+                        new_combo['template_value_ids'] = new_combo['template_value_ids'] + [value['template_value_id']]
+                        new_combo['price_extra'] = new_combo['price_extra'] + value['price_extra']
                         
-                        generate_combinations(lines, new_combination, index + 1)
+                        # Copy the attributes dictionary and add this attribute
+                        new_attributes = new_combo['attributes'].copy()
+                        new_attributes[attribute_name] = value['value']
+                        new_combo['attributes'] = new_attributes
+                        
+                        # Continue with the next attribute line
+                        generate_combinations(lines, current_index + 1, new_combo)
                 
+                # Start the recursive generation
                 generate_combinations(attribute_lines)
+                
                 return combinations
             except Exception as e:
                 print(f"Error generating variant combinations: {e}")
@@ -585,33 +574,3 @@ class ProductAttribute:
             finally:
                 conn.close()
         return []
-        
-    @staticmethod
-    def generate_variant_combinations_dict(attributes_values):
-        """
-        Generate all possible combinations of attribute values
-        
-        Args:
-            attributes_values: A dict where keys are attribute names and values are lists of values
-                e.g. {'Color': ['Red', 'Blue'], 'Size': ['S', 'M', 'L']}
-        
-        Returns:
-            A list of dictionaries, each representing a variant combination
-        """
-        def generate_combinations(attrs, current=None, index=0):
-            if current is None:
-                current = {}
-            
-            if index >= len(attrs):
-                return [current.copy()]
-            
-            attr_name = list(attrs.keys())[index]
-            combinations = []
-            
-            for value in attrs[attr_name]:
-                current[attr_name] = value
-                combinations.extend(generate_combinations(attrs, current, index + 1))
-            
-            return combinations
-        
-        return generate_combinations(attributes_values)
