@@ -130,27 +130,40 @@ class VariantSelectionDialog(QDialog):
                 # Parse attribute values safely from either 'attributes' or 'attribute_values' key
                 attr_values = {}
                 
-                # Try both possible keys for attributes (for compatibility with different data structures)
-                for key in ['attributes', 'attribute_values']:
-                    if variant.get(key):
-                        try:
-                            # Handle both string JSON and direct dictionary representation
-                            if isinstance(variant[key], str):
-                                parsed_values = json.loads(variant[key])
-                                attr_values = parsed_values
-                                # Add the parsed result back to the variant for later use
-                                variant[key] = parsed_values
-                            else:
-                                attr_values = variant[key]
-                            
-                            # If we successfully parsed values, stop looking
-                            if attr_values:
-                                break
-                        except Exception as e:
-                            print(f"Error parsing {key}: {e}")
+                # Enhanced attribute extraction with more robust parsing
+                # Try direct attributes dictionary first
+                if variant.get('attributes') and isinstance(variant.get('attributes'), dict):
+                    attr_values = variant.get('attributes')
+                    print(f"Using attributes dict directly: {attr_values}")
                 
-                # Debug output
-                print(f"Variant {variant.get('id')}: Parsed attribute values: {attr_values}")
+                # Then try attribute_values dictionary
+                elif variant.get('attribute_values') and isinstance(variant.get('attribute_values'), dict):
+                    attr_values = variant.get('attribute_values')
+                    print(f"Using attribute_values dict directly: {attr_values}")
+                
+                # Then try JSON strings
+                else:
+                    for key in ['attributes', 'attribute_values']:
+                        if variant.get(key) and isinstance(variant[key], str):
+                            try:
+                                # Parse JSON with error handling
+                                parsed_values = json.loads(variant[key])
+                                
+                                # Store both in attributes and attribute_values for consistency
+                                variant['attributes'] = parsed_values
+                                variant['attribute_values'] = parsed_values
+                                attr_values = parsed_values
+                                
+                                print(f"Successfully parsed {key} JSON: {attr_values}")
+                                break
+                            except json.JSONDecodeError as e:
+                                print(f"JSON parsing error for {key}: {e}")
+                            except Exception as e:
+                                print(f"General error parsing {key}: {e}")
+                
+                # Debug output with detailed info
+                print(f"Variant {variant.get('id')}: Final parsed attribute values: {attr_values}")
+                print(f"Variant data: {variant}")
                 
                 # Create list item
                 item = QListWidgetItem()
@@ -162,39 +175,60 @@ class VariantSelectionDialog(QDialog):
                 # Variant name/description
                 variant_info = QVBoxLayout()
                 
-                # Create variant name from attributes
+                # Create variant name from attributes with improved handling
+                # First use existing name if it exists and looks valid
                 variant_name = variant.get('name', '')
-                if not variant_name and attr_values:
+                
+                # If no name or we want to regenerate from attributes
+                if (not variant_name or '/' not in variant_name) and attr_values:
                     try:
                         # Ensure we have some kind of name even if we can't extract from attributes
                         default_name = f"Variante #{variant.get('id', '')}"
-                    
-                        # Try multiple approaches to get a meaningful name
+                        
+                        # Debug the incoming name and attributes
+                        print(f"Generating name for variant {variant.get('id')}, existing name: '{variant_name}', attributes: {attr_values}")
+                        
+                        # Extract values from attribute_values with careful handling
                         attr_vals = []
-                    
-                        # First try: If we have a direct 'name' field, use it
-                        if variant.get('name'):
+                        
+                        # If we have a direct 'name' field and it looks valid, use it
+                        if variant.get('name') and '/' in variant.get('name'):
                             variant_name = variant['name']
-                        # Second try: Extract from attribute values dictionary
+                            print(f"Using existing name: {variant_name}")
+                        
+                        # Extract from attribute values dictionary (primary method)
                         elif isinstance(attr_values, dict) and attr_values:
                             attr_vals = []
-                            # Safely extract values from the dictionary
-                            for attr_name, attr_value in attr_values.items():
+                            
+                            # Sort attributes by name for consistent display
+                            for attr_name in sorted(attr_values.keys()):
+                                attr_value = attr_values[attr_name]
+                                
                                 if attr_value:
-                                    # Handle if attr_value is another dict or a complex object
+                                    # Handle different types of attribute values
                                     if isinstance(attr_value, dict):
-                                        # Try to extract a meaningful value from the dict
+                                        # Extract from nested dictionary
                                         for val in attr_value.values():
                                             if val:
                                                 attr_vals.append(str(val))
+                                                print(f"Added nested value: {val}")
                                                 break
                                     else:
+                                        # Add simple attribute value
                                         attr_vals.append(str(attr_value))
-                        
+                                        print(f"Added attribute: {attr_name}={attr_value}")
+                            
+                            # Create variant name from extracted values
                             if attr_vals:
                                 variant_name = " / ".join(attr_vals)
+                                print(f"Generated name from attributes: {variant_name}")
                             else:
                                 variant_name = default_name
+                                print(f"Using default name: {default_name}")
+                        # Fallback to original variant name if it exists
+                        elif variant.get('name'):
+                            variant_name = variant['name']
+                            print(f"Using existing name (fallback): {variant_name}")
                         # Third try: If attr_values is a list
                         elif isinstance(attr_values, list) and attr_values:
                             attr_vals = [str(val) for val in attr_values if val]
@@ -254,21 +288,33 @@ class VariantSelectionDialog(QDialog):
                 price_stock = QVBoxLayout()
                 price_stock.setAlignment(Qt.AlignRight)
                 
-                # Calculate adjusted price with all attribute price extras
+                # Calculate adjusted price with all attribute price extras - enhanced version
                 base_price = float(self.product['unit_price'])
                 
-                # Use total_price_adjustment which includes attribute price extras and variant price adjustment
-                if 'total_price_adjustment' in variant:
-                    price_adj = float(variant.get('total_price_adjustment', 0))
+                # Check if we have a unit_price directly on the variant (highest priority)
+                if variant.get('unit_price') and float(variant.get('unit_price')) > 0:
+                    final_price = float(variant.get('unit_price'))
+                    print(f"Using direct variant price: {final_price}")
                 else:
-                    # Fallback to just the variant's price adjustment if the total isn't available
-                    price_adj = float(variant.get('price_adjustment', 0))
+                    # Use total_price_adjustment which includes attribute price extras and variant price adjustment
+                    if 'total_price_adjustment' in variant:
+                        price_adj = float(variant.get('total_price_adjustment', 0))
+                    else:
+                        # Fallback to just the variant's price adjustment if the total isn't available
+                        price_adj = float(variant.get('price_adjustment', 0))
                     
-                # Show the price breakdown if we have extras data
-                if 'price_extras' in variant and variant['price_extras'] > 0:
-                    print(f"Variant price breakdown: Base {base_price} + Attributes {variant['price_extras']} + Variant {variant.get('price_adjustment', 0)} = {base_price + price_adj}")
+                    # Show detailed price breakdown for debugging
+                    base_adj = float(variant.get('price_adjustment', 0))
+                    attr_extras = variant.get('price_extras', 0)
                     
-                final_price = base_price + price_adj
+                    print(f"Variant {variant.get('id')} price calculation:")
+                    print(f"  Base price: {base_price}")
+                    print(f"  Variant adjustment: {base_adj}")
+                    print(f"  Attribute extras: {attr_extras}")
+                    print(f"  Total adjustment: {price_adj}")
+                    
+                    final_price = base_price + price_adj
+                    print(f"  Final price: {final_price}")
                 
                 price_label = QLabel(f"{final_price:.2f} MAD")
                 price_label.setStyleSheet("font-weight: bold; color: #28a745;")

@@ -644,11 +644,16 @@ class Product:
                         # Calculate variant price
                         variant_price = variant.get('price', unit_price)
                         
-                        # Prepare variant insert query
+                        # Get attribute values and ensure they are in JSON format
+                        attribute_values = variant.get('attribute_values', '{}')
+                        if isinstance(attribute_values, dict):
+                            attribute_values = json.dumps(attribute_values)
+                        
+                        # Prepare variant insert query with correct column names
                         cursor.execute("""
                             INSERT INTO ProductVariants (
                                 product_id, name, barcode, unit_price, 
-                                purchase_price, stock, attributes, sku,
+                                purchase_price, stock, attribute_values, sku,
                                 created_at, updated_at
                             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """, (
@@ -658,7 +663,7 @@ class Product:
                             variant_price,
                             variant.get('purchase_price', purchase_price),
                             variant.get('stock', 0),
-                            variant.get('attribute_values', '{}'),
+                            attribute_values,
                             variant.get('sku', ''),
                             current_time,
                             current_time

@@ -304,14 +304,18 @@ class VariantManagementDialog(QDialog):
             base_sku = "SKU"  # This would normally come from the product
             sku_parts = []
             
-            # Get first 2 letters (or full word if shorter) of each value, with attribute first letter
+            # Create a more robust SKU using full attribute values
             for attr, value in combo.items():
                 # Clean and normalize the value - remove spaces and special characters
                 cleaned_value = ''.join(c for c in value if c.isalnum())
-                # Get attribute first letter + up to 2 chars from value
+                # Use the attribute first letter + the full value (up to 4 chars) to avoid truncation issues
                 attr_prefix = attr[0].upper()
-                value_part = cleaned_value[:2].upper()
+                # Use full value for better identification
+                value_part = cleaned_value.upper() if len(cleaned_value) <= 4 else cleaned_value[:4].upper()
                 sku_parts.append(f"{attr_prefix}{value_part}")
+                
+                # Debug output to track attribute value processing
+                print(f"Attribute: {attr}, Value: {value}, SKU part: {attr_prefix}{value_part}")
             
             # Add a unique timestamp-based suffix to ensure uniqueness
             import time
