@@ -317,14 +317,18 @@ class VariantManagementDialog(QDialog):
             # Only process existing variants (ones with ID)
             if 'id' in variant and variant['id']:
                 # Update variant in database
+                # Use unit_price instead of price_adjustment based on the actual database structure
                 update_data = {
-                    'price_adjustment': variant['price'],
+                    'unit_price': variant['price'],  # Updated to use unit_price instead of price_adjustment
                     'stock': variant['stock'],
                     'barcode': variant['barcode'],
                     'name': variant['name'],
                     'sku': variant['sku'],
                     'attribute_values': variant['attributes']
                 }
+                
+                # Print debug info
+                print(f"Updating variant {variant['id']} with {update_data}")
                 
                 if Product.update_variant(variant['id'], **update_data):
                     success_count += 1
