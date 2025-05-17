@@ -207,64 +207,206 @@ class VariantManagementDialog(QDialog):
             self.delete_variant(row)
             
     def edit_variant(self, row):
-        """Edit a variant"""
+        """Edit a variant with business rule validation"""
         if row < 0 or row >= len(self.variants):
             return
             
         variant = self.variants[row]
         
+        # Get product information for margin calculation
+        product_info = None
+        if self.product_id:
+            product_info = self.get_product_info(self.product_id)
+            
         # Create a dialog to edit the variant
         edit_dialog = QDialog(self)
         edit_dialog.setWindowTitle(f"Modifier la variante: {variant['name']}")
+        edit_dialog.setMinimumWidth(500)
         
         layout = QFormLayout(edit_dialog)
         
         # Create input fields
         name_input = QLineEdit(variant['name'])
         sku_input = QLineEdit(variant['sku'])
+        
+        # Price input with margin calculation
+        price_frame = QFrame()
+        price_layout = QVBoxLayout(price_frame)
+        price_layout.setContentsMargins(0, 0, 0, 0)
+        
         price_input = QDoubleSpinBox()
         price_input.setMinimum(0)
         price_input.setMaximum(999999.99)
         price_input.setValue(variant['price'])
         price_input.setSuffix(" MAD")
+        price_layout.addWidget(price_input)
+        
+        # Add purchase price and margin information
+        purchase_price = 0
+        if product_info and 'purchase_price' in product_info:
+            purchase_price = float(product_info['purchase_price'] or 0)
+            
+            # Create margin display label
+            self.margin_label = QLabel()
+            self.margin_label.setStyleSheet("font-size: 11px;")
+            price_layout.addWidget(self.margin_label)
+            
+            # Function to update margin calculation
+            def update_margin_display():
+                selling_price = price_input.value()
+                margin = selling_price - purchase_price
+                margin_percent = (margin / purchase_price * 100) if purchase_price > 0 else 0
+                
+                if margin < 0:
+                    self.margin_label.setStyleSheet("color: red; font-weight: bold; font-size: 11px;")
+                    self.margin_label.setText(f"ALERTE: Marge négative! {margin:.2f} MAD ({margin_percent:.1f}%)")
+                elif margin_percent < 10:
+                    self.margin_label.setStyleSheet("color: orange; font-size: 11px;")
+                    self.margin_label.setText(f"Marge faible: {margin:.2f} MAD ({margin_percent:.1f}%)")
+                else:
+                    self.margin_label.setStyleSheet("color: green; font-size: 11px;")
+                    self.margin_label.setText(f"Marge: {margin:.2f} MAD ({margin_percent:.1f}%)")
+            
+            # Connect price changes to margin updates
+            price_input.valueChanged.connect(update_margin_display)
+            
+            # Initial update
+            update_margin_display()
+            
+            # Add purchase price info
+            purchase_info = QLabel(f"Prix d'achat: {purchase_price:.2f} MAD")
+            purchase_info.setStyleSheet("font-size: 11px; color: #666;")
+            price_layout.addWidget(purchase_info)
+        
         stock_input = QSpinBox()
         stock_input.setMinimum(0)
         stock_input.setMaximum(999999)
         stock_input.setValue(variant['stock'])
         barcode_input = QLineEdit(variant['barcode'])
         
+        # Check if variant attributes are empty and warn
+        has_attributes = variant.get('attributes') and len(variant.get('attributes', {})) > 0
+        
+        # Add attribute warning if needed
+        if not has_attributes:
+            attr_warning = QLabel("⚠️ Cette variante n'a pas d'attributs définis!")
+            attr_warning.setStyleSheet("color: red; font-weight: bold;")
+            layout.addRow(attr_warning)
+        
         # Add fields to layout
         layout.addRow("Nom:", name_input)
         layout.addRow("SKU:", sku_input)
-        layout.addRow("Ajustement de prix:", price_input)
+        layout.addRow("Prix de vente:", price_frame)
         layout.addRow("Stock:", stock_input)
         layout.addRow("Code-barres:", barcode_input)
         
+        # Business rules section
+        rules_frame = QFrame()
+        rules_frame.setStyleSheet("background-color: #f8f9fa; padding: 10px; border-radius: 5px;")
+        rules_layout = QVBoxLayout(rules_frame)
+        
+        rules_title = QLabel("Règles commerciales")
+        rules_title.setStyleSheet("font-weight: bold;")
+        rules_layout.addWidget(rules_title)
+        
+        # Add business rule checkboxes
+        prevent_negative_margin = QCheckBox("Empêcher les marges négatives")
+        prevent_negative_margin.setChecked(True)
+        rules_layout.addWidget(prevent_negative_margin)
+        
+        layout.addRow(rules_frame)
+        
         # Add buttons
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(edit_dialog.accept)
+        buttons.accepted.connect(lambda: self.validate_and_accept_variant_edit(
+            edit_dialog, 
+            variant, 
+            name_input.text(),
+            sku_input.text(),
+            price_input.value(),
+            stock_input.value(),
+            barcode_input.text(),
+            purchase_price,
+            prevent_negative_margin.isChecked(),
+            has_attributes
+        ))
         buttons.rejected.connect(edit_dialog.reject)
         layout.addRow(buttons)
         
         # Show the dialog
-        if edit_dialog.exec_():
-            # Update the variant with new values
-            variant['name'] = name_input.text()
-            variant['sku'] = sku_input.text()
-            variant['price'] = price_input.value()
-            variant['stock'] = stock_input.value()
-            variant['barcode'] = barcode_input.text()
+        edit_dialog.exec_()
+    
+    def validate_and_accept_variant_edit(self, dialog, variant, name, sku, price, stock, barcode, 
+                                          purchase_price, prevent_negative_margin, has_attributes):
+        """Validate variant data against business rules before accepting"""
+        validation_errors = []
+        
+        # Check for empty name
+        if not name.strip():
+            validation_errors.append("Le nom de la variante ne peut pas être vide")
             
-            # Update the table
-            self.variants_table.item(row, 1).setText(variant['name'])
-            self.variants_table.item(row, 2).setText(variant['sku'])
-            price_spin = self.variants_table.cellWidget(row, 3)
-            if price_spin:
-                price_spin.setValue(variant['price'])
-            stock_spin = self.variants_table.cellWidget(row, 4)
-            if stock_spin:
-                stock_spin.setValue(variant['stock'])
-            self.variants_table.item(row, 5).setText(variant['barcode'])
+        # Check for empty SKU
+        if not sku.strip():
+            validation_errors.append("Le SKU ne peut pas être vide")
+            
+        # Check for negative margin if enabled
+        if prevent_negative_margin and purchase_price > 0 and price < purchase_price:
+            margin = price - purchase_price
+            validation_errors.append(f"Prix de vente ({price:.2f} MAD) inférieur au prix d'achat ({purchase_price:.2f} MAD). Marge: {margin:.2f} MAD")
+            
+        # Check for excessively large price reduction from base price
+        if self.product_id:
+            product_info = self.get_product_info(self.product_id)
+            if product_info and 'unit_price' in product_info:
+                base_price = float(product_info['unit_price'] or 0)
+                if price < base_price * 0.5:  # More than 50% reduction
+                    validation_errors.append(f"Réduction excessive: {price:.2f} MAD est plus de 50% inférieur au prix de base ({base_price:.2f} MAD)")
+        
+        # Enforce attributes if the variant doesn't have any
+        if not has_attributes:
+            # Just warn, don't prevent saving
+            QMessageBox.warning(
+                dialog,
+                "Avertissement",
+                "Cette variante n'a pas d'attributs définis. Il est recommandé d'ajouter des attributs pour une meilleure organisation."
+            )
+        
+        # Show validation errors if any
+        if validation_errors:
+            error_message = "Veuillez corriger les erreurs suivantes:\n\n" + "\n".join(f"• {error}" for error in validation_errors)
+            QMessageBox.warning(dialog, "Validation échouée", error_message)
+            return
+        
+        # If everything is valid, update the variant
+        variant['name'] = name
+        variant['sku'] = sku
+        variant['price'] = price
+        variant['stock'] = stock
+        variant['barcode'] = barcode
+        
+        # Update the table
+        row = self.variants.index(variant)
+        self.variants_table.item(row, 1).setText(variant['name'])
+        self.variants_table.item(row, 2).setText(variant['sku'])
+        price_spin = self.variants_table.cellWidget(row, 3)
+        if price_spin:
+            price_spin.setValue(variant['price'])
+        stock_spin = self.variants_table.cellWidget(row, 4)
+        if stock_spin:
+            stock_spin.setValue(variant['stock'])
+        self.variants_table.item(row, 5).setText(variant['barcode'])
+        
+        # Close the dialog
+        dialog.accept()
+        
+    def get_product_info(self, product_id):
+        """Get product information for margin calculation"""
+        try:
+            from models.product import Product
+            return Product.get_product(product_id)
+        except Exception as e:
+            print(f"Error getting product info: {e}")
+            return None
     
     def delete_variant(self, row):
         """Delete a variant"""
@@ -523,6 +665,57 @@ class VariantManagementDialog(QDialog):
             QMessageBox.warning(self, "Aucune variante", "Aucun attribut ou valeur sélectionné.")
             return
             
+        # Get product info for default pricing and business rules
+        product_info = None
+        base_price = 0
+        purchase_price = 0
+        
+        if self.product_id:
+            product_info = self.get_product_info(self.product_id)
+            if product_info:
+                base_price = float(product_info.get('unit_price', 0) or 0)
+                purchase_price = float(product_info.get('purchase_price', 0) or 0)
+        
+        # Calculate default minimum price (ensures a 15% margin)
+        min_price = purchase_price * 1.15 if purchase_price > 0 else base_price
+        default_price = max(base_price, min_price)
+        
+        # Ask user about pricing strategy
+        if base_price > 0:
+            strategy_msg = QMessageBox(self)
+            strategy_msg.setWindowTitle("Stratégie de tarification des variantes")
+            strategy_msg.setText("Comment souhaitez-vous tarifer les nouvelles variantes?")
+            strategy_msg.setIcon(QMessageBox.Question)
+            
+            # Add pricing options
+            base_btn = strategy_msg.addButton(f"Prix de base ({base_price:.2f} MAD)", QMessageBox.AcceptRole)
+            safe_btn = strategy_msg.addButton(f"Prix sécurisé ({default_price:.2f} MAD)", QMessageBox.AcceptRole)
+            custom_btn = strategy_msg.addButton("Prix personnalisé", QMessageBox.AcceptRole)
+            cancel_btn = strategy_msg.addButton(QMessageBox.Cancel)
+            
+            # Show dialog and get result
+            strategy_msg.exec_()
+            
+            # Process result
+            if strategy_msg.clickedButton() == cancel_btn:
+                return
+            elif strategy_msg.clickedButton() == custom_btn:
+                # Get custom price
+                from PyQt5.QtWidgets import QInputDialog
+                custom_price, ok = QInputDialog.getDouble(
+                    self, 
+                    "Prix personnalisé", 
+                    f"Entrez le prix pour toutes les variantes (min. recommandé: {min_price:.2f}):", 
+                    base_price, min_price, 999999.99, 2
+                )
+                if not ok:
+                    return
+                default_price = custom_price
+            elif strategy_msg.clickedButton() == safe_btn:
+                default_price = min_price
+            else:  # base_btn
+                default_price = base_price
+            
         # Generate combinations with the dict approach
         combinations = ProductAttribute.generate_variant_combinations_dict(attr_values)
         
@@ -538,6 +731,11 @@ class VariantManagementDialog(QDialog):
             
             # Generate a more unique SKU
             base_sku = "SKU"  # This would normally come from the product
+            if product_info and product_info.get('name'):
+                # Use first 3 chars of product name if available
+                prod_name = ''.join(c for c in product_info['name'] if c.isalnum())
+                base_sku = prod_name[:3].upper()
+                
             sku_parts = []
             
             # Get first 2 letters (or full word if shorter) of each value, with attribute first letter
@@ -560,13 +758,25 @@ class VariantManagementDialog(QDialog):
                 'active': True,
                 'name': variant_name,
                 'sku': sku,
-                'price': 0.0,  # Default price from product
+                'price': default_price,  # Use safe default price
                 'stock': 0,
                 'barcode': '',
                 'attributes': combo
             }
             
+            # If we have purchase price info, add it to the variant for margin calculations
+            if purchase_price > 0:
+                variant['purchase_price'] = purchase_price
+            
             self.variants.append(variant)
+            
+        # Show confirmation message
+        QMessageBox.information(
+            self,
+            "Variantes générées",
+            f"{len(self.variants)} variantes ont été générées avec le prix de {default_price:.2f} MAD.\n\n"
+            f"Vous pouvez maintenant modifier les prix individuellement si nécessaire."
+        )
         
         # Populate the variants table
         self.populate_variants_table()
@@ -574,6 +784,18 @@ class VariantManagementDialog(QDialog):
     def populate_variants_table(self):
         """Populate the variants table with generated variants"""
         self.variants_table.setRowCount(len(self.variants))
+        
+        # Get product info for margin calculations
+        product_info = None
+        if self.product_id:
+            product_info = self.get_product_info(self.product_id)
+            
+        # Get purchase price for margin calculation
+        purchase_price = 0
+        base_price = 0
+        if product_info:
+            purchase_price = float(product_info.get('purchase_price', 0) or 0)
+            base_price = float(product_info.get('unit_price', 0) or 0)
         
         for row, variant in enumerate(self.variants):
             # Active checkbox
@@ -590,6 +812,13 @@ class VariantManagementDialog(QDialog):
             name_item = QTableWidgetItem(variant['name'])
             name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)  # Make read-only
             
+            # Check if variant has empty attributes and add warning indicator
+            has_attributes = variant.get('attributes') and len(variant.get('attributes', {})) > 0
+            if not has_attributes:
+                name_item.setText(f"⚠️ {variant['name']}")
+                name_item.setToolTip("Attention: Cette variante n'a pas d'attributs définis!")
+                name_item.setForeground(Qt.red)
+            
             # Store variant ID in the name item if it exists
             if 'id' in variant and variant['id']:
                 name_item.setData(Qt.UserRole, variant['id'])
@@ -599,13 +828,58 @@ class VariantManagementDialog(QDialog):
             # SKU
             sku_item = QTableWidgetItem(variant['sku'])
             
-            # Price widget
+            # Price widget with margin validation
+            price_widget = QWidget()
+            price_layout = QVBoxLayout(price_widget)
+            price_layout.setContentsMargins(0, 0, 0, 0)
+            price_layout.setSpacing(0)
+            
             price_spin = QDoubleSpinBox()
             price_spin.setMinimum(0)
             price_spin.setMaximum(999999.99)
             price_spin.setValue(variant['price'])
             price_spin.setSuffix(" MAD")
+            
+            # Calculate margin and add visual indicators
+            if purchase_price > 0:
+                margin = variant['price'] - purchase_price
+                margin_percent = (margin / purchase_price * 100) if purchase_price > 0 else 0
+                
+                # Style the price spinbox based on margin
+                if margin < 0:
+                    price_spin.setStyleSheet("QDoubleSpinBox { background-color: #ffcccc; color: red; font-weight: bold; }")
+                    tooltip = f"ALERTE: Marge négative! {margin:.2f} MAD ({margin_percent:.1f}%)"
+                elif margin_percent < 10:
+                    price_spin.setStyleSheet("QDoubleSpinBox { background-color: #fff3cd; }")
+                    tooltip = f"Marge faible: {margin:.2f} MAD ({margin_percent:.1f}%)"
+                else:
+                    tooltip = f"Marge: {margin:.2f} MAD ({margin_percent:.1f}%)"
+                
+                price_spin.setToolTip(tooltip)
+                
+                # Add margin indicator label for negative margins
+                if margin < 0:
+                    margin_indicator = QLabel(f"⚠️ -{abs(margin):.0f} MAD")
+                    margin_indicator.setStyleSheet("color: red; font-size: 9px;")
+                    price_layout.addWidget(margin_indicator)
+            
+            # Check for large price reductions
+            if base_price > 0 and variant['price'] < base_price * 0.5:
+                reduction = base_price - variant['price']
+                reduction_percent = (reduction / base_price * 100)
+                
+                if 'margin_indicator' not in locals():  # Only add if we don't already have one
+                    reduction_warning = QLabel(f"⚠️ -{reduction_percent:.0f}%")
+                    reduction_warning.setStyleSheet("color: orange; font-size: 9px;")
+                    price_layout.addWidget(reduction_warning)
+                    
+                if not price_spin.toolTip():
+                    price_spin.setToolTip(f"Réduction excessive: {reduction_percent:.1f}% du prix de base")
+            
+            # Connect value changed after setting initial value
             price_spin.valueChanged.connect(lambda value, r=row: self.update_variant_price(r, value))
+            
+            price_layout.addWidget(price_spin)
             
             # Stock widget
             stock_spin = QSpinBox()
@@ -636,6 +910,14 @@ class VariantManagementDialog(QDialog):
             delete_btn.setFixedSize(30, 25)
             delete_btn.clicked.connect(lambda checked, r=row: self.delete_variant(r))
             
+            # Add warning icon for problematic variants
+            if (purchase_price > 0 and variant['price'] < purchase_price) or not has_attributes:
+                warning_btn = QPushButton("⚠️")
+                warning_btn.setToolTip("Cette variante présente des problèmes (marge négative ou attributs manquants)")
+                warning_btn.setFixedSize(30, 25)
+                warning_btn.setStyleSheet("color: red; font-weight: bold;")
+                actions_layout.addWidget(warning_btn)
+            
             # Add buttons to actions layout
             actions_layout.addWidget(edit_btn)
             actions_layout.addWidget(delete_btn)
@@ -645,7 +927,7 @@ class VariantManagementDialog(QDialog):
             self.variants_table.setCellWidget(row, 0, active_cell)
             self.variants_table.setItem(row, 1, name_item)
             self.variants_table.setItem(row, 2, sku_item)
-            self.variants_table.setCellWidget(row, 3, price_spin)
+            self.variants_table.setCellWidget(row, 3, price_widget)
             self.variants_table.setCellWidget(row, 4, stock_spin)
             self.variants_table.setItem(row, 5, barcode_item)
             self.variants_table.setCellWidget(row, 6, actions_widget)
