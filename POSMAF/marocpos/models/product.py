@@ -294,36 +294,44 @@ class Product:
                         variant_dict['attribute_values'] = {}
                         variant_dict['attributes'] = {}
                     
-                    # Compute total price adjustment from attribute combinations
+                    # Fix price calculation: Calculate the total price adjustment from explicit price_adjustment
+                    # and any attribute price extras
                     try:
-                        # Get the template attribute values for this variant
-                        cursor.execute("""
-                            SELECT ptav.price_extra
-                            FROM ProductVariantCombination pvc
-                            JOIN ProductTemplateAttributeValue ptav ON pvc.template_attribute_value_id = ptav.id
-                            WHERE pvc.product_variant_id = ?
-                        """, (variant_dict['id'],))
-                        
-                        # Sum up all price extras
-                        price_extras = cursor.fetchall()
-                        total_price_extra = sum(float(extra['price_extra'] or 0) for extra in price_extras)
-                        
-                        # Add in any explicit price_adjustment for the variant 
+                        # Get the explicit price adjustment for the variant
                         base_adj = float(variant_dict.get('price_adjustment') or 0)
                         
-                        # Store both values
-                        variant_dict['price_extras'] = total_price_extra
-                        variant_dict['total_price_adjustment'] = total_price_extra + base_adj
+                        # Get the template attribute values for this variant using a more reliable query
+                        price_extras = 0
+                        try:
+                            cursor.execute("""
+                                SELECT ptav.price_extra
+                                FROM ProductVariantCombination pvc
+                                JOIN ProductTemplateAttributeValue ptav ON pvc.template_attribute_value_id = ptav.id
+                                WHERE pvc.product_variant_id = ?
+                            """, (variant_dict['id'],))
+                            
+                            # Sum up all price extras
+                            attribute_extras = cursor.fetchall()
+                            if attribute_extras:
+                                price_extras = sum(float(extra['price_extra'] or 0) for extra in attribute_extras)
+                        except Exception as e:
+                            print(f"Failed to retrieve attribute price extras: {e}")
+                            # We'll continue with price_extras as 0
                         
-                        print(f"Variant {variant_dict['id']} - Total price adjustment: {variant_dict['total_price_adjustment']} ({base_adj} variant, {total_price_extra} attributes)")
+                        # Store both values
+                        variant_dict['price_extras'] = price_extras
+                        variant_dict['total_price_adjustment'] = base_adj + price_extras
+                        
+                        print(f"Variant {variant_dict['id']} - Fixed price calculation: Base {base_adj} + Extras {price_extras} = Total {variant_dict['total_price_adjustment']}")
                         
                     except Exception as e:
                         print(f"Error calculating price adjustment for variant {variant_dict['id']}: {e}")
-                        # Use just the base adjustment as fallback
+                        # Use just the base adjustment as fallback and log the error
+                        variant_dict['price_extras'] = 0
                         variant_dict['total_price_adjustment'] = float(variant_dict.get('price_adjustment') or 0)
                         
                     # Add explicit debugging output
-                    print(f"Returning variant: {variant_dict['id']}, attributes: {variant_dict.get('attributes')}, price_adjustment: {variant_dict.get('total_price_adjustment')}")
+                    print(f"Returning variant: {variant_dict['id']}, attributes: {variant_dict.get('attributes')}, price_adjustment: {variant_dict['total_price_adjustment']}")
                     
                     result.append(variant_dict)
                 
@@ -519,6 +527,66 @@ class Product:
             except Exception as e:
                 print(f"Error updating variant: {e}")
                 return False
+            finally:
+                conn.close()
+        return False
+        
+    @staticmethod
+    def delete_variant(variant_id):
+        """Delete a product variant and its related data"""
+        conn = get_connection()
+        if conn:
+            try:
+                cursor = conn.cursor()
+                
+                # Begin transaction for data integrity
+                cursor.execute("BEGIN TRANSACTION")
+                
+                try:
+                    # First delete from ProductVariantCombination table (if it exists)
+                    cursor.execute("""
+                        DELETE FROM ProductVariantCombination 
+                        WHERE product_variant_id = ?
+                    """, (variant_id,))
+                except sqlite3.OperationalError:
+                    # Table might not exist or no records
+                    pass
+                
+                try:
+                    # Delete from StockMovements if there are any for this variant
+                    cursor.execute("""
+                        DELETE FROM StockMovements 
+                        WHERE variant_id = ?
+                    """, (variant_id,))
+                except sqlite3.OperationalError:
+                    # Table might not exist or no records
+                    pass
+                
+                # Delete the variant itself
+                cursor.execute("""
+                    DELETE FROM ProductVariants 
+                    WHERE id = ?
+                """, (variant_id,))
+                
+                # Check if we actually deleted something
+                if cursor.rowcount == 0:
+                    cursor.execute("ROLLBACK")
+                    print(f"No variant found with ID {variant_id}")
+                    return False
+                
+                cursor.execute("COMMIT")
+                print(f"Successfully deleted variant with ID {variant_id}")
+                return True
+                
+            except Exception as e:
+                # Ensure transaction is rolled back on error
+                try:
+                    cursor.execute("ROLLBACK")
+                except:
+                    pass
+                print(f"Error deleting variant: {e}")
+                return False
+                
             finally:
                 conn.close()
         return False
