@@ -259,6 +259,15 @@ class Product:
             try:
                 cursor = conn.cursor()
                 
+                # Get the base product's unit price
+                cursor.execute("""
+                    SELECT unit_price
+                    FROM Products
+                    WHERE id = ?
+                """, (product_id,))
+                product_row = cursor.fetchone()
+                base_product_price = float(product_row['unit_price'] if product_row else 0)
+                
                 # First get the variants basic data
                 cursor.execute("""
                     SELECT *
@@ -267,6 +276,17 @@ class Product:
                     ORDER BY id
                 """, (product_id,))
                 variants = cursor.fetchall()
+                
+                # Check if price_adjustment column exists or if we need to use unit_price
+                has_price_adjustment = False
+                
+                # If we have variants, check their structure
+                if variants and len(variants) > 0:
+                    variant_dict = dict(variants[0])
+                    # Check which price columns are available
+                    has_price_adjustment = 'price_adjustment' in variant_dict
+                    has_unit_price = 'unit_price' in variant_dict
+                    print(f"Variant structure check: has_price_adjustment={has_price_adjustment}, has_unit_price={has_unit_price}")
                 
                 # Convert variants to a more robust format
                 result = []
@@ -294,13 +314,24 @@ class Product:
                         variant_dict['attribute_values'] = {}
                         variant_dict['attributes'] = {}
                     
-                    # Fix price calculation: Calculate the total price adjustment from explicit price_adjustment
-                    # and any attribute price extras
+                    # Fix price calculation: Calculate price either from unit_price or price_adjustment
                     try:
-                        # Get the explicit price adjustment for the variant
-                        base_adj = float(variant_dict.get('price_adjustment') or 0)
+                        # Identify pricing structure and calculate appropriately
+                        if has_price_adjustment:
+                            # If using price_adjustment, we need to add it to the base product price
+                            price_adj = float(variant_dict.get('price_adjustment') or 0)
+                            variant_price = base_product_price + price_adj
+                            variant_dict['price_adjustment'] = price_adj
+                        else:
+                            # If using unit_price directly, use that value
+                            variant_price = float(variant_dict.get('unit_price') or base_product_price)
+                            # Compute price_adjustment for compatibility with code that expects it
+                            variant_dict['price_adjustment'] = variant_price - base_product_price
                         
-                        # Get the template attribute values for this variant using a more reliable query
+                        # Add or ensure unit_price field exists
+                        variant_dict['unit_price'] = variant_price
+                        
+                        # Compute price extras from attribute combinations
                         price_extras = 0
                         try:
                             cursor.execute("""
@@ -318,20 +349,22 @@ class Product:
                             print(f"Failed to retrieve attribute price extras: {e}")
                             # We'll continue with price_extras as 0
                         
-                        # Store both values
+                        # Store calculated values
                         variant_dict['price_extras'] = price_extras
-                        variant_dict['total_price_adjustment'] = base_adj + price_extras
+                        variant_dict['total_price_adjustment'] = variant_dict['price_adjustment'] + price_extras
                         
-                        print(f"Variant {variant_dict['id']} - Fixed price calculation: Base {base_adj} + Extras {price_extras} = Total {variant_dict['total_price_adjustment']}")
+                        print(f"Variant {variant_dict['id']} - Fixed price calculation: Base product price {base_product_price}, Variant price {variant_price}, Total price = {variant_price + price_extras}")
                         
                     except Exception as e:
                         print(f"Error calculating price adjustment for variant {variant_dict['id']}: {e}")
-                        # Use just the base adjustment as fallback and log the error
+                        # Use base product price as fallback and log the error
                         variant_dict['price_extras'] = 0
-                        variant_dict['total_price_adjustment'] = float(variant_dict.get('price_adjustment') or 0)
+                        variant_dict['unit_price'] = base_product_price
+                        variant_dict['price_adjustment'] = 0
+                        variant_dict['total_price_adjustment'] = 0
                         
                     # Add explicit debugging output
-                    print(f"Returning variant: {variant_dict['id']}, attributes: {variant_dict.get('attributes')}, price_adjustment: {variant_dict['total_price_adjustment']}")
+                    print(f"Returning variant: {variant_dict['id']}, attributes: {variant_dict.get('attributes')}, final price: {variant_dict['unit_price']}")
                     
                     result.append(variant_dict)
                 
