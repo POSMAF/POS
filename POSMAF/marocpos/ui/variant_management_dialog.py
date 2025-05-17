@@ -3,9 +3,10 @@ from PyQt5.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QMessageBox,
     QHeaderView, QWidget, QSplitter, QListWidget, QListWidgetItem,
     QComboBox, QCheckBox, QDialogButtonBox, QDoubleSpinBox, QSpinBox,
-    QFormLayout, QGroupBox, QTabWidget
+    QFormLayout, QGroupBox, QTabWidget, QMenu
 )
 from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QCursor
 from models.product_attribute import ProductAttribute
 from models.product import Product
 import json
@@ -17,8 +18,11 @@ class VariantManagementDialog(QDialog):
         self.variant_attributes = variant_attributes or []  # List of attribute names
         self.attribute_values = {}  # Dict of attribute name -> list of values
         self.variants = []  # List of variant dictionaries
+        self.existing_variants = []  # List of existing variants from the database
         self.init_ui()
         self.load_attributes()
+        if self.product_id:
+            self.load_existing_variants()
 
     def init_ui(self):
         self.setWindowTitle("Gestion des variantes de produit")
@@ -28,11 +32,11 @@ class VariantManagementDialog(QDialog):
         main_layout = QVBoxLayout(self)
         
         # Create tabs
-        tabs = QTabWidget()
-        tabs.addTab(self.create_attributes_tab(), "1. Sélection des attributs")
-        tabs.addTab(self.create_variants_tab(), "2. Variantes")
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.create_attributes_tab(), "1. Sélection des attributs")
+        self.tabs.addTab(self.create_variants_tab(), "2. Variantes")
         
-        main_layout.addWidget(tabs)
+        main_layout.addWidget(self.tabs)
         
         # Dialog buttons
         button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -85,14 +89,19 @@ class VariantManagementDialog(QDialog):
         
         # Variants table
         self.variants_table = QTableWidget()
-        self.variants_table.setColumnCount(6)
+        self.variants_table.setColumnCount(7)  # Added one more column for actions
         self.variants_table.setHorizontalHeaderLabels([
-            "Actif", "Variante", "SKU", "Prix de vente", "Stock", "Code-barres"
+            "Actif", "Variante", "SKU", "Prix de vente", "Stock", "Code-barres", "Actions"
         ])
         
         self.variants_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.variants_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
         self.variants_table.setColumnWidth(0, 50)
+        self.variants_table.setColumnWidth(6, 100)  # Actions column width
+        
+        # Enable context menu
+        self.variants_table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.variants_table.customContextMenuRequested.connect(self.show_context_menu)
         
         layout.addWidget(self.variants_table)
         
@@ -109,9 +118,232 @@ class VariantManagementDialog(QDialog):
         bulk_layout.addWidget(deactive_all_btn)
         bulk_layout.addStretch()
         
+        # Add buttons for editing operations
+        refresh_btn = QPushButton("Actualiser")
+        refresh_btn.clicked.connect(self.load_existing_variants)
+        refresh_btn.setToolTip("Recharger les variantes depuis la base de données")
+        
+        save_btn = QPushButton("Enregistrer les modifications")
+        save_btn.clicked.connect(self.save_variant_changes)
+        save_btn.setToolTip("Sauvegarder les modifications sur les variantes existantes")
+        
+        bulk_layout.addWidget(refresh_btn)
+        bulk_layout.addWidget(save_btn)
+        
         layout.addLayout(bulk_layout)
         
         return tab
+        
+    def load_existing_variants(self):
+        """Load existing variants from the database"""
+        if not self.product_id:
+            return
+            
+        try:
+            # Clear existing variants in table
+            self.variants_table.setRowCount(0)
+            self.variants = []
+            
+            # Get variants from the database
+            self.existing_variants = Product.get_variants(self.product_id)
+            print(f"Loaded {len(self.existing_variants)} existing variants")
+            
+            if not self.existing_variants:
+                # No existing variants, show a message
+                return
+                
+            # Convert existing variants to our format and add to the variants list
+            for variant in self.existing_variants:
+                # Create a variant dict in our format
+                formatted_variant = {
+                    'id': variant.get('id'),
+                    'active': True,
+                    'name': variant.get('name', ''),
+                    'sku': variant.get('sku', ''),
+                    'price': float(variant.get('price_adjustment') or 0),
+                    'stock': int(variant.get('stock') or 0),
+                    'barcode': variant.get('barcode', ''),
+                    'attributes': variant.get('attributes', {})
+                }
+                
+                self.variants.append(formatted_variant)
+            
+            # Populate the table with the existing variants
+            self.populate_variants_table()
+            
+            # Switch to the variants tab
+            self.tabs.setCurrentIndex(1)
+            
+        except Exception as e:
+            print(f"Error loading existing variants: {e}")
+            QMessageBox.warning(
+                self,
+                "Erreur",
+                f"Erreur lors du chargement des variantes existantes: {str(e)}"
+            )
+    
+    def show_context_menu(self, position):
+        """Show context menu for variant actions"""
+        menu = QMenu()
+        
+        edit_action = menu.addAction("Modifier")
+        delete_action = menu.addAction("Supprimer")
+        
+        # Get the item at the position
+        item = self.variants_table.itemAt(position)
+        if not item:
+            return
+            
+        # Get the row of the item
+        row = item.row()
+        
+        # Show the menu at the cursor position
+        action = menu.exec_(QCursor.pos())
+        
+        # Handle the action
+        if action == edit_action:
+            self.edit_variant(row)
+        elif action == delete_action:
+            self.delete_variant(row)
+            
+    def edit_variant(self, row):
+        """Edit a variant"""
+        if row < 0 or row >= len(self.variants):
+            return
+            
+        variant = self.variants[row]
+        
+        # Create a dialog to edit the variant
+        edit_dialog = QDialog(self)
+        edit_dialog.setWindowTitle(f"Modifier la variante: {variant['name']}")
+        
+        layout = QFormLayout(edit_dialog)
+        
+        # Create input fields
+        name_input = QLineEdit(variant['name'])
+        sku_input = QLineEdit(variant['sku'])
+        price_input = QDoubleSpinBox()
+        price_input.setMinimum(0)
+        price_input.setMaximum(999999.99)
+        price_input.setValue(variant['price'])
+        price_input.setSuffix(" MAD")
+        stock_input = QSpinBox()
+        stock_input.setMinimum(0)
+        stock_input.setMaximum(999999)
+        stock_input.setValue(variant['stock'])
+        barcode_input = QLineEdit(variant['barcode'])
+        
+        # Add fields to layout
+        layout.addRow("Nom:", name_input)
+        layout.addRow("SKU:", sku_input)
+        layout.addRow("Ajustement de prix:", price_input)
+        layout.addRow("Stock:", stock_input)
+        layout.addRow("Code-barres:", barcode_input)
+        
+        # Add buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(edit_dialog.accept)
+        buttons.rejected.connect(edit_dialog.reject)
+        layout.addRow(buttons)
+        
+        # Show the dialog
+        if edit_dialog.exec_():
+            # Update the variant with new values
+            variant['name'] = name_input.text()
+            variant['sku'] = sku_input.text()
+            variant['price'] = price_input.value()
+            variant['stock'] = stock_input.value()
+            variant['barcode'] = barcode_input.text()
+            
+            # Update the table
+            self.variants_table.item(row, 1).setText(variant['name'])
+            self.variants_table.item(row, 2).setText(variant['sku'])
+            price_spin = self.variants_table.cellWidget(row, 3)
+            if price_spin:
+                price_spin.setValue(variant['price'])
+            stock_spin = self.variants_table.cellWidget(row, 4)
+            if stock_spin:
+                stock_spin.setValue(variant['stock'])
+            self.variants_table.item(row, 5).setText(variant['barcode'])
+    
+    def delete_variant(self, row):
+        """Delete a variant"""
+        if row < 0 or row >= len(self.variants):
+            return
+            
+        variant = self.variants[row]
+        
+        # Ask for confirmation
+        reply = QMessageBox.question(
+            self,
+            "Confirmation",
+            f"Êtes-vous sûr de vouloir supprimer la variante '{variant['name']}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+            
+        # Check if it's an existing variant from database
+        if 'id' in variant and variant['id']:
+            # Delete from database
+            if Product.delete_variant(variant['id']):
+                # Remove from our lists
+                self.variants.pop(row)
+                self.variants_table.removeRow(row)
+                QMessageBox.information(
+                    self,
+                    "Succès",
+                    "Variante supprimée avec succès."
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Erreur",
+                    "Erreur lors de la suppression de la variante."
+                )
+        else:
+            # Just remove from our lists since it's not in database yet
+            self.variants.pop(row)
+            self.variants_table.removeRow(row)
+    
+    def save_variant_changes(self):
+        """Save changes to existing variants"""
+        success_count = 0
+        error_count = 0
+        
+        for variant in self.variants:
+            # Only process existing variants (ones with ID)
+            if 'id' in variant and variant['id']:
+                # Update variant in database
+                update_data = {
+                    'price_adjustment': variant['price'],
+                    'stock': variant['stock'],
+                    'barcode': variant['barcode'],
+                    'name': variant['name'],
+                    'sku': variant['sku'],
+                    'attribute_values': variant['attributes']
+                }
+                
+                if Product.update_variant(variant['id'], **update_data):
+                    success_count += 1
+                else:
+                    error_count += 1
+        
+        # Show result message
+        if error_count == 0:
+            QMessageBox.information(
+                self,
+                "Succès",
+                f"{success_count} variantes mises à jour avec succès."
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                "Résultats",
+                f"{success_count} variantes mises à jour avec succès. {error_count} erreurs."
+            )
 
     def load_attributes(self):
         """Load existing attributes and generate UI"""
@@ -354,6 +586,12 @@ class VariantManagementDialog(QDialog):
             name_item = QTableWidgetItem(variant['name'])
             name_item.setFlags(name_item.flags() & ~Qt.ItemIsEditable)  # Make read-only
             
+            # Store variant ID in the name item if it exists
+            if 'id' in variant and variant['id']:
+                name_item.setData(Qt.UserRole, variant['id'])
+                # Add a visual indicator for existing variants
+                name_item.setToolTip(f"ID: {variant['id']} (Variante existante)")
+            
             # SKU
             sku_item = QTableWidgetItem(variant['sku'])
             
@@ -376,6 +614,29 @@ class VariantManagementDialog(QDialog):
             barcode_item = QTableWidgetItem(variant['barcode'])
             barcode_item.setData(Qt.UserRole, variant)
             
+            # Add action buttons
+            actions_widget = QWidget()
+            actions_layout = QHBoxLayout(actions_widget)
+            actions_layout.setContentsMargins(2, 2, 2, 2)
+            actions_layout.setSpacing(2)
+            
+            # Edit button
+            edit_btn = QPushButton("✏️")
+            edit_btn.setToolTip("Modifier cette variante")
+            edit_btn.setFixedSize(30, 25)
+            edit_btn.clicked.connect(lambda checked, r=row: self.edit_variant(r))
+            
+            # Delete button
+            delete_btn = QPushButton("🗑️")
+            delete_btn.setToolTip("Supprimer cette variante")
+            delete_btn.setFixedSize(30, 25)
+            delete_btn.clicked.connect(lambda checked, r=row: self.delete_variant(r))
+            
+            # Add buttons to actions layout
+            actions_layout.addWidget(edit_btn)
+            actions_layout.addWidget(delete_btn)
+            actions_layout.addStretch()
+            
             # Add to table
             self.variants_table.setCellWidget(row, 0, active_cell)
             self.variants_table.setItem(row, 1, name_item)
@@ -383,6 +644,7 @@ class VariantManagementDialog(QDialog):
             self.variants_table.setCellWidget(row, 3, price_spin)
             self.variants_table.setCellWidget(row, 4, stock_spin)
             self.variants_table.setItem(row, 5, barcode_item)
+            self.variants_table.setCellWidget(row, 6, actions_widget)
 
     def update_variant_active(self, row, state):
         """Update the active state of a variant"""
