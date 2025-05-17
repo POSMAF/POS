@@ -794,21 +794,35 @@ class SalesManagementWindow(QWidget):
             
             variant_name = product['name'] + variant_desc
             
-            # Calculate price - base price + all attribute adjustments
-            base_price = float(product['unit_price'])
-            
-            # Use total_price_adjustment which includes all attribute price extras 
-            if 'total_price_adjustment' in variant:
-                price_adj = float(variant.get('total_price_adjustment', 0))
+            # Determine the correct price for the variant
+            if 'unit_price' in variant and variant['unit_price'] is not None:
+                # Preferred method: Use the variant's direct unit price (already includes all adjustments)
+                final_price = float(variant['unit_price'])
+                print(f"Cart: Using variant's direct unit_price: {final_price}")
             else:
-                # Fallback to just the variant's direct price adjustment
-                price_adj = float(variant.get('price_adjustment', 0))
+                # Fallback method: Calculate from base + adjustments
+                base_price = float(product['unit_price'])
                 
-            # Show the complete price breakdown if extras are available
-            if 'price_extras' in variant and variant['price_extras'] > 0:
-                print(f"Cart variant price: Base {base_price} + Attributes {variant['price_extras']} + Variant adj {variant.get('price_adjustment', 0)} = {base_price + price_adj}")
+                # Use total_price_adjustment if available
+                if 'total_price_adjustment' in variant:
+                    price_adj = float(variant.get('total_price_adjustment', 0))
+                else:
+                    # Fallback to just the variant's direct price adjustment
+                    price_adj = float(variant.get('price_adjustment', 0))
+                    
+                final_price = base_price + price_adj
+                print(f"Cart: Calculating price from base ({base_price}) + adjustment ({price_adj}) = {final_price}")
+            
+            # Validate the final price - cannot be zero or negative
+            if final_price <= 0:
+                # Use base product price as fallback
+                base_price = float(product['unit_price'])
+                print(f"Warning: Invalid variant price ({final_price}), using base product price: {base_price}")
+                final_price = base_price
                 
-            final_price = base_price + price_adj
+            # Show detailed debug info
+            print(f"Cart final variant price: {final_price} MAD")
+            print(f"Variant data: unit_price={variant.get('unit_price')}, price_adjustment={variant.get('price_adjustment')}, total_adjustment={variant.get('total_price_adjustment')}")
             
             # Add to cart
             row = self.cart_table.rowCount()
